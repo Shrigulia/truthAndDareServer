@@ -1,0 +1,30 @@
+{
+  "users": [
+    {
+      "id": "betu",
+      "password": "bubu",
+      "username": "shona (shri)",
+      "dares": [],
+      "truths": []
+    },
+    {
+      "id": "puchu",
+      "password": "shona",
+      "username": "betuu (moni)",
+      "dares": [
+        {
+          "id": "1761646883235",
+          "text": "sdasdasd"
+        }
+      ],
+      "truths": []
+    }
+  ],
+  "messages": [
+    {
+      "username": "shona (shri)",
+      "message": "hii",
+      "timestamp": "2025-10-28T10:17:47.729Z"
+    }
+  ]
+}
