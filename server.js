@@ -113,7 +113,7 @@ async function broadcastUserList() {
 
 // === SOCKET CONNECTION ===
 io.on('connection', (socket) => {
-    console.log(`user connected`);
+    // console.log(`user connected`);
 
     // IMPORTANT: socket.user is a mongoose document snapshot from auth middleware
     // We will re-query for latest state where needed.
@@ -294,7 +294,7 @@ socket.on('requestFreshData', async () => {
 
     // === DISCONNECT ===
     socket.on('disconnect', () => {
-        console.log(`user disconnected`);
+        // console.log(`user disconnected`);
         broadcastUserList();
     });
 });
