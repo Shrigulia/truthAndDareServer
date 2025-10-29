@@ -273,6 +273,25 @@ io.on('connection', (socket) => {
         }
     });
 
+    // === REFRESH DATA ON REQUEST (for auto reconnect) ===
+socket.on('requestFreshData', async () => {
+    try {
+        const freshUser = await User.findOne({ id: socket.user.id }).lean().exec();
+        const messages = await Message.find({}).sort({ timestamp: 1 }).lean().exec();
+
+        socket.emit('init', {
+            currentUser: { id: freshUser.id, username: freshUser.username },
+            dares: freshUser.dares || [],
+            truths: freshUser.truths || [],
+            messages: messages || []
+        });
+
+        // console.log(`✅ Fresh data sent to ${socket.user.id}`);
+    } catch (err) {
+        console.error('Fresh data request failed:', err);
+    }
+});
+
     // === DISCONNECT ===
     socket.on('disconnect', () => {
         console.log(`user disconnected`);
