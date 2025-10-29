@@ -1,8 +1,12 @@
+// server.js (NEW - MongoDB + Mongoose)
+// Replace your old server.js with this file. It keeps same socket events & behavior.
+// IMPORTANT: set process.env.MONGO_URI in Render / your env before starting.
+
 const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
-const fs = require('fs');
-const path = require('path');
+const mongoose = require('mongoose');
+require('dotenv').config();
 
 const app = express();
 const server = http.createServer(app);
@@ -10,206 +14,273 @@ const io = new Server(server, {
     cors: { origin: "*", methods: ["GET", "POST"] }
 });
 
-// === HARD CODED USERS ===
+// === HARD CODED USERS (keeps same credentials for quick auth) ===
+// You can later remove this and use DB-only auth if required.
 const VALID_USERS = {
     "betu": "bubu",
     "puchu": "shona"
 };
 
-// === DATABASE PATH ===
-const DB_PATH = path.join(__dirname, 'data.json');
-let db = { users: [], messages: [] };
-
-// === LOAD DATABASE ===
-function loadDB() {
-    if (fs.existsSync(DB_PATH)) {
-        const data = fs.readFileSync(DB_PATH, 'utf8');
-        db = JSON.parse(data);
-    } else {
-        // Default users
-        db = {
-            users: [
-                {
-                    id: "betu",
-                    password: "bubu",
-                    username: "Betu Baby",
-                    dares: [],
-                    truths: []
-                },
-                {
-                    id: "puchu",
-                    password: "shona",
-                    username: "Puchu Jaan",
-                    dares: [],
-                    truths: []
-                }
-            ],
-            messages: []
-        };
-        saveDB();
-    }
+// === MONGO CONNECTION ===
+const MONGO_URI = process.env.MONGO_URI || ''; // ← SET THIS in Render env
+if (!MONGO_URI) {
+    console.error('MONGO_URI not set. Set the environment variable and restart.');
+    process.exit(1);
 }
 
-// === SAVE DATABASE ===
-function saveDB() {
-    fs.writeFileSync(DB_PATH, JSON.stringify(db, null, 2));
-}
+mongoose.connect(MONGO_URI, {
+    useNewUrlParser: true,
+    useUnifiedTopology: true
+}).then(() => console.log('Connected to MongoDB Atlas'))
+  .catch(err => {
+    console.error('MongoDB connection error:', err);
+    process.exit(1);
+  });
 
-loadDB();
+// === SCHEMAS / MODELS ===
+const itemSchema = new mongoose.Schema({
+    id: String,
+    text: String
+}, { _id: false });
 
-// === AUTH MIDDLEWARE ===
-io.use((socket, next) => {
-    const { id, password } = socket.handshake.auth;
-    if (id && password && VALID_USERS[id] === password) {
-        const user = db.users.find(u => u.id === id);
-        if (user) {
-            socket.user = user; // ✅ use reference
-            return next();
+const userSchema = new mongoose.Schema({
+    id: { type: String, unique: true },
+    password: String,
+    username: String,
+    dares: [itemSchema],
+    truths: [itemSchema]
+});
+
+const messageSchema = new mongoose.Schema({
+    username: String,
+    message: String,
+    timestamp: { type: Date, default: Date.now }
+});
+
+const User = mongoose.model('User', userSchema);
+const Message = mongoose.model('Message', messageSchema);
+
+// === Helper: ensure default users exist (migrated behavior from data.json defaults) ===
+async function ensureDefaultUsers() {
+    for (const [id, pwd] of Object.entries(VALID_USERS)) {
+        const exists = await User.findOne({ id }).exec();
+        if (!exists) {
+            const defaultUsername = id === 'betu' ? 'shona (shri)' : (id === 'puchu' ? 'betuu (moni)' : id);
+            await User.create({
+                id,
+                password: pwd,
+                username: defaultUsername,
+                dares: [],
+                truths: []
+            });
+            // console.log(`Created default user: ${id}`);
         }
     }
-    next(new Error("Authentication failed"));
+}
+
+// Run once at startup
+ensureDefaultUsers().catch(err => console.error('Error creating default users:', err));
+
+// === AUTH MIDDLEWARE (Socket.IO) ===
+io.use(async (socket, next) => {
+    try {
+        const { id, password } = socket.handshake.auth || {};
+        if (id && password && VALID_USERS[id] === password) {
+            // Fetch user from DB
+            let user = await User.findOne({ id }).exec();
+            if (!user) {
+                // Shouldn't happen due to ensureDefaultUsers, but create if missing
+                user = await User.create({ id, password, username: id, dares: [], truths: [] });
+            }
+            socket.user = user; // attach mongoose doc
+            return next();
+        } else {
+            // Reject
+            return next(new Error("Authentication failed"));
+        }
+    } catch (err) {
+        console.error('Auth middleware error:', err);
+        return next(new Error("Authentication error"));
+    }
 });
 
 // === BROADCAST USER LIST (for reveal) ===
-function broadcastUserList() {
-    const userList = db.users.map(u => ({ id: u.id, username: u.username }));
+async function broadcastUserList() {
+    const users = await User.find({}, 'id username').lean().exec();
+    const userList = users.map(u => ({ id: u.id, username: u.username }));
     io.emit('userList', userList);
 }
 
-// === CONNECTION ===
+// === SOCKET CONNECTION ===
 io.on('connection', (socket) => {
-    // console.log(`${socket.user.username} connected`);
     console.log(`user connected`);
 
-    // Send initial data to this user only
-    socket.emit('init', {
-        currentUser: { id: socket.user.id, username: socket.user.username },
-        dares: socket.user.dares,
-        truths: socket.user.truths,
-        messages: db.messages
-    });
+    // IMPORTANT: socket.user is a mongoose document snapshot from auth middleware
+    // We will re-query for latest state where needed.
 
-    // Send updated user list to all
-    broadcastUserList();
+    // Send initial data to this user only
+    (async () => {
+        try {
+            const freshUser = await User.findOne({ id: socket.user.id }).lean().exec();
+            const messages = await Message.find({}).sort({ timestamp: 1 }).lean().exec();
+
+            socket.emit('init', {
+                currentUser: { id: freshUser.id, username: freshUser.username },
+                dares: freshUser.dares || [],
+                truths: freshUser.truths || [],
+                messages: messages || []
+            });
+
+            // Update global user list
+            broadcastUserList();
+        } catch (err) {
+            console.error('Error during init emit:', err);
+        }
+    })();
 
     // === ADD DARE ===
-    socket.on('addDare', (text) => {
-        const dare = { id: Date.now().toString(), text };
-        socket.user.dares.push(dare);
-        saveDB();
-        socket.emit('updateOwnDares', socket.user.dares);
-        broadcastUserList(); // For reveal
+    socket.on('addDare', async (text) => {
+        try {
+            const dare = { id: Date.now().toString(), text };
+            await User.updateOne({ id: socket.user.id }, { $push: { dares: dare } }).exec();
+            const updated = await User.findOne({ id: socket.user.id }).lean().exec();
+            socket.emit('updateOwnDares', updated.dares);
+            broadcastUserList();
+        } catch (err) {
+            console.error('addDare error:', err);
+        }
     });
 
     // === ADD TRUTH ===
-    socket.on('addTruth', (text) => {
-        const truth = { id: Date.now().toString(), text };
-        socket.user.truths.push(truth);
-        saveDB();
-        socket.emit('updateOwnTruths', socket.user.truths);
-        broadcastUserList();
+    socket.on('addTruth', async (text) => {
+        try {
+            const truth = { id: Date.now().toString(), text };
+            await User.updateOne({ id: socket.user.id }, { $push: { truths: truth } }).exec();
+            const updated = await User.findOne({ id: socket.user.id }).lean().exec();
+            socket.emit('updateOwnTruths', updated.truths);
+            broadcastUserList();
+        } catch (err) {
+            console.error('addTruth error:', err);
+        }
     });
 
     // === DELETE ITEM ===
-    socket.on('deleteItem', ({ type, id }) => {
-        if (type === 'dare') {
-            socket.user.dares = socket.user.dares.filter(d => d.id !== id);
-        } else if (type === 'truth') {
-            socket.user.truths = socket.user.truths.filter(t => t.id !== id);
+    socket.on('deleteItem', async ({ type, id }) => {
+        try {
+            if (type === 'dare') {
+                await User.updateOne({ id: socket.user.id }, { $pull: { dares: { id } } }).exec();
+                const updated = await User.findOne({ id: socket.user.id }).lean().exec();
+                socket.emit('updateOwnDares', updated.dares);
+            } else if (type === 'truth') {
+                await User.updateOne({ id: socket.user.id }, { $pull: { truths: { id } } }).exec();
+                const updated = await User.findOne({ id: socket.user.id }).lean().exec();
+                socket.emit('updateOwnTruths', updated.truths);
+            }
+            broadcastUserList();
+        } catch (err) {
+            console.error('deleteItem error:', err);
         }
-        saveDB();
-        socket.emit(type === 'dare' ? 'updateOwnDares' : 'updateOwnTruths', 
-            type === 'dare' ? socket.user.dares : socket.user.truths);
-        broadcastUserList();
     });
 
     // === EDIT ITEM ===
-    socket.on('editItem', ({ type, id, newText }) => {
-        if (type === 'dare') {
-            const dare = socket.user.dares.find(d => d.id === id);
-            if (dare) dare.text = newText;
-        } else if (type === 'truth') {
-            const truth = socket.user.truths.find(t => t.id === id);
-            if (truth) truth.text = newText;
+    socket.on('editItem', async ({ type, id, newText }) => {
+        try {
+            if (type === 'dare') {
+                await User.updateOne({ id: socket.user.id, 'dares.id': id }, { $set: { 'dares.$.text': newText } }).exec();
+                const updated = await User.findOne({ id: socket.user.id }).lean().exec();
+                socket.emit('updateOwnDares', updated.dares);
+            } else if (type === 'truth') {
+                await User.updateOne({ id: socket.user.id, 'truths.id': id }, { $set: { 'truths.$.text': newText } }).exec();
+                const updated = await User.findOne({ id: socket.user.id }).lean().exec();
+                socket.emit('updateOwnTruths', updated.truths);
+            }
+            broadcastUserList();
+        } catch (err) {
+            console.error('editItem error:', err);
         }
-        saveDB();
-        socket.emit(type === 'dare' ? 'updateOwnDares' : 'updateOwnTruths', 
-            type === 'dare' ? socket.user.dares : socket.user.truths);
-        broadcastUserList();
     });
 
     // === SEND MESSAGE ===
-    socket.on('sendMessage', (message) => {
-        const msg = {
-            username: socket.user.username,
-            message,
-            timestamp: new Date().toISOString()
-        };
-        db.messages.push(msg);
-        saveDB();
-        io.emit('newMessage', msg);
+    socket.on('sendMessage', async (message) => {
+        try {
+            const msgDoc = await Message.create({
+                username: socket.user.username,
+                message,
+                timestamp: new Date()
+            });
+            const msg = { username: msgDoc.username, message: msgDoc.message, timestamp: msgDoc.timestamp };
+            io.emit('newMessage', msg);
+        } catch (err) {
+            console.error('sendMessage error:', err);
+        }
     });
 
     // === REVEAL ITEM ===
-    socket.on('revealItem', () => {
-        const otherUsers = db.users.filter(u => u.id !== socket.user.id);
-        const allItems = [];
-        otherUsers.forEach(u => {
-            u.dares.forEach(d => allItems.push({ text: d.text, owner: u.username }));
-            u.truths.forEach(t => allItems.push({ text: t.text, owner: u.username }));
-        });
-
-        if (allItems.length > 0) {
-            const random = allItems[Math.floor(Math.random() * allItems.length)];
-            socket.emit('revealResult', random.text);
-            socket.broadcast.emit('revealNotification', {
-                username: socket.user.username,
-                item: random.text
+    socket.on('revealItem', async () => {
+        try {
+            const otherUsers = await User.find({ id: { $ne: socket.user.id } }).lean().exec();
+            const allItems = [];
+            otherUsers.forEach(u => {
+                (u.dares || []).forEach(d => allItems.push({ text: d.text, owner: u.username }));
+                (u.truths || []).forEach(t => allItems.push({ text: t.text, owner: u.username }));
             });
-        } else {
-            socket.emit('revealResult', 'No items from your partner yet!');
+
+            if (allItems.length > 0) {
+                const random = allItems[Math.floor(Math.random() * allItems.length)];
+                socket.emit('revealResult', random.text);
+                socket.broadcast.emit('revealNotification', {
+                    username: socket.user.username,
+                    item: random.text
+                });
+            } else {
+                socket.emit('revealResult', 'No items from your partner yet!');
+            }
+        } catch (err) {
+            console.error('revealItem error:', err);
         }
     });
 
     // === CLEAR CHAT ===
-    socket.on('clearChat', () => {
-        db.messages = [];
-        saveDB();
-        io.emit('clearChat');
+    socket.on('clearChat', async () => {
+        try {
+            await Message.deleteMany({}).exec();
+            io.emit('clearChat');
+        } catch (err) {
+            console.error('clearChat error:', err);
+        }
     });
 
     // === EDIT USERNAME ===
-    socket.on('editUsername', (newUsername) => {
-        if (newUsername && newUsername.trim()) {
-            const oldName = socket.user.username;
-            socket.user.username = newUsername.trim();
-            // Update in db
-            const dbUser = db.users.find(u => u.id === socket.user.id);
-            if (dbUser) dbUser.username = newUsername.trim();
-            saveDB();
-            socket.emit('usernameUpdated', newUsername.trim());
-            broadcastUserList();
-            // Update old messages
-            db.messages.forEach(m => {
-                if (m.username === oldName) m.username = newUsername.trim();
-            });
-            saveDB();
-            io.emit('messagesUpdated', db.messages);
+    socket.on('editUsername', async (newUsername) => {
+        try {
+            if (newUsername && newUsername.trim()) {
+                const oldName = socket.user.username;
+                const trimmed = newUsername.trim();
+
+                await User.updateOne({ id: socket.user.id }, { $set: { username: trimmed } }).exec();
+
+                // Update messages that had oldName
+                await Message.updateMany({ username: oldName }, { $set: { username: trimmed } }).exec();
+
+                socket.emit('usernameUpdated', trimmed);
+                broadcastUserList();
+
+                const messages = await Message.find({}).sort({ timestamp: 1 }).lean().exec();
+                io.emit('messagesUpdated', messages);
+            }
+        } catch (err) {
+            console.error('editUsername error:', err);
         }
     });
 
     // === DISCONNECT ===
     socket.on('disconnect', () => {
-        console.log(`${socket.user.username} disconnected`);
+        console.log(`user disconnected`);
         broadcastUserList();
     });
 });
 
-// === SERVE FRONTEND ===
-// app.use(express.static(path.join(__dirname, '../frontend')));
-
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
     console.log(`Server running on port ${PORT}`);
-    // console.log(`Open: http://localhost:${PORT}`);
 });
