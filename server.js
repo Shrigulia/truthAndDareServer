@@ -24,16 +24,13 @@ const VALID_USERS = {
 };
 
 // === MONGO CONNECTION ===
-const MONGO_URI = process.env.MONGO_URI || ''; // ← SET THIS in Render env
+const MONGO_URI = process.env.MONGO_URI; // ← SET THIS in Render env
 if (!MONGO_URI) {
     console.error('MONGO_URI not set. Set the environment variable and restart.');
     process.exit(1);
 }
 
-mongoose.connect(MONGO_URI, {
-    useNewUrlParser: true,
-    useUnifiedTopology: true
-}).then(() => console.log('Connected to MongoDB Atlas'))
+mongoose.connect(MONGO_URI).then(() => console.log('Connected to MongoDB Atlas'))
     .catch(err => {
         console.error('MongoDB connection error:', err);
         process.exit(1);
@@ -310,7 +307,7 @@ const SELF_URL = process.env.RENDER_EXTERNAL_URL;
 cron.schedule('*/14 * * * *', async () => {
     try {
         await axios.get(SELF_URL);
-        console.log(`[KEEP-ALIVE] Pinged self at ${new Date().toLocaleTimeString()}`);
+        // console.log(`[KEEP-ALIVE] Pinged self at ${new Date().toLocaleTimeString()}`);
     } catch (err) {
         console.error('[KEEP-ALIVE] Ping failed:', err.message);
     }
@@ -318,5 +315,5 @@ cron.schedule('*/14 * * * *', async () => {
 
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
-    console.log(`Server running on -> http://localhost:${PORT} -` );
+    console.log(`Server started`);
 });
