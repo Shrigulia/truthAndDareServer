@@ -6,6 +6,8 @@ const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
 const mongoose = require('mongoose');
+const axios = require('axios');
+const cron = require('node-cron');
 require('dotenv').config();
 
 const app = express();
@@ -32,10 +34,10 @@ mongoose.connect(MONGO_URI, {
     useNewUrlParser: true,
     useUnifiedTopology: true
 }).then(() => console.log('Connected to MongoDB Atlas'))
-  .catch(err => {
-    console.error('MongoDB connection error:', err);
-    process.exit(1);
-  });
+    .catch(err => {
+        console.error('MongoDB connection error:', err);
+        process.exit(1);
+    });
 
 // === SCHEMAS / MODELS ===
 const itemSchema = new mongoose.Schema({
@@ -299,7 +301,22 @@ socket.on('requestFreshData', async () => {
     });
 });
 
+// === KEEP SERVER AWAKE (Ping every 14 minutes) ===
+
+app.get('/', (req, res) => res.status(200).send('Server is alive 💖'));
+
+const SELF_URL = process.env.RENDER_EXTERNAL_URL;
+
+cron.schedule('*/14 * * * *', async () => {
+    try {
+        await axios.get(SELF_URL);
+        console.log(`[KEEP-ALIVE] Pinged self at ${new Date().toLocaleTimeString()}`);
+    } catch (err) {
+        console.error('[KEEP-ALIVE] Ping failed:', err.message);
+    }
+});
+
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
-    console.log(`Server running on port ${PORT}`);
+    console.log(`Server running on -> http://localhost:${PORT} -` );
 });
